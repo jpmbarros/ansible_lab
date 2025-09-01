@@ -8,9 +8,9 @@ pipeline {
   }
 
   parameters {
-    string(name: 'BRANCH',    defaultValue: 'main',                 description: 'Git branch to build')
-    string(name: 'INVENTORY', defaultValue: 'inventory/hosts.ini',  description: 'Path to inventory file')
-    string(name: 'PLAYBOOK',  defaultValue: 'playbooks/site.yml',   description: 'Playbook to run')
+    string(name: 'BRANCH',    defaultValue: 'main',                description: 'Git branch to build')
+    string(name: 'INVENTORY', defaultValue: 'inventory/hosts.ini', description: 'Path to inventory file')
+    string(name: 'PLAYBOOK',  defaultValue: 'playbooks/site.yml',  description: 'Playbook to run (path or just filename)')
     booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Run Ansible in --check mode first')
   }
 
@@ -47,10 +47,25 @@ pipeline {
       steps {
         sh '''#!/bin/bash
           echo "== Syntax check =="
-          echo "Playbook: $PLAYBOOK"
-          test -f "$PLAYBOOK"  || { echo "Playbook $PLAYBOOK not found"; exit 2; }
+          # Resolve playbook path smartly
+          PB="$PLAYBOOK"
+          if [ ! -f "$PB" ]; then
+            # If user passed just a filename, try playbooks/<filename>
+            base="$(basename "$PB")"
+            [ -f "playbooks/$base" ] && PB="playbooks/$base"
+          fi
+          if [ ! -f "$PB" ]; then
+            # Last resort: search a few levels
+            found="$(find . -maxdepth 3 -type f -name "$(basename "$PLAYBOOK")" -print -quit)"
+            [ -n "$found" ] && PB="$found"
+          fi
+
+          echo "Playbook resolved to: $PB"
+          test -f "$PB" || { echo "Playbook not found: tried $PLAYBOOK, playbooks/$(basename "$PLAYBOOK"), and search."; exit 2; }
           test -f "$INVENTORY" || { echo "Inventory $INVENTORY not found"; exit 2; }
-          ansible-playbook -i "$INVENTORY" "$PLAYBOOK" --syntax-check
+
+          ansible-playbook -i "$INVENTORY" "$PB" --syntax-check
+          echo "$PB" > .resolved_playbook
         '''
       }
     }
@@ -58,9 +73,10 @@ pipeline {
     stage('Lint (optional)') {
       steps {
         sh '''#!/bin/bash
+          PB="$(cat .resolved_playbook 2>/dev/null || echo "$PLAYBOOK")"
           if command -v ansible-lint >/dev/null 2>&1; then
             echo "== ansible-lint =="
-            ansible-lint "$PLAYBOOK" || true
+            ansible-lint "$PB" || true
           else
             echo "ansible-lint not installed; skipping"
           fi
@@ -72,8 +88,9 @@ pipeline {
       when { expression { return params.DRY_RUN } }
       steps {
         sh '''#!/bin/bash
+          PB="$(cat .resolved_playbook 2>/dev/null || echo "$PLAYBOOK")"
           echo "== Dry run =="
-          ansible-playbook -i "$INVENTORY" "$PLAYBOOK" --check --diff | tee ansible_dryrun.log
+          ansible-playbook -i "$INVENTORY" "$PB" --check --diff | tee ansible_dryrun.log
         '''
       }
     }
@@ -82,8 +99,9 @@ pipeline {
       when { expression { return !params.DRY_RUN } }
       steps {
         sh '''#!/bin/bash
+          PB="$(cat .resolved_playbook 2>/dev/null || echo "$PLAYBOOK")"
           echo "== Apply changes =="
-          ansible-playbook -i "$INVENTORY" "$PLAYBOOK" | tee ansible_apply.log
+          ansible-playbook -i "$INVENTORY" "$PB" | tee ansible_apply.log
         '''
       }
     }

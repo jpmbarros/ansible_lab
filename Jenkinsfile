@@ -8,15 +8,17 @@ pipeline {
   }
 
   parameters {
-    string(name: 'BRANCH',    defaultValue: 'main',                description: 'Git branch to build')
-    string(name: 'INVENTORY', defaultValue: 'inventory/hosts.ini', description: 'Path to inventory file')
-    string(name: 'PLAYBOOK',  defaultValue: 'playbooks/site.yml',  description: 'Playbook to run (path or just filename)')
-    booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Run Ansible in --check mode first')
+    string(name: 'BRANCH',        defaultValue: 'main',                description: 'Git branch to build')
+    string(name: 'INVENTORY',     defaultValue: 'inventory/hosts.ini', description: 'Path to inventory file')
+    string(name: 'PLAYBOOK',      defaultValue: 'playbooks/site.yml',  description: 'Playbook to run (path or just filename)')
+    booleanParam(name: 'DRY_RUN', defaultValue: true,                  description: 'Run Ansible in --check mode first')
+    string(name: 'SSH_CRED_ID',   defaultValue: 'ansible-agent',       description: 'Jenkins SSH credential ID for target hosts')
   }
 
   environment {
     INVENTORY = "${params.INVENTORY}"
     PLAYBOOK  = "${params.PLAYBOOK}"
+
     ANSIBLE_NOCOWS = '1'
     ANSIBLE_HOST_KEY_CHECKING = 'False'
     PY_COLORS = '1'
@@ -47,21 +49,21 @@ pipeline {
       steps {
         sh '''#!/bin/bash
           echo "== Syntax check =="
-          # Resolve playbook path smartly
           PB="$PLAYBOOK"
+
+          # If not a file, try playbooks/<filename>
           if [ ! -f "$PB" ]; then
-            # If user passed just a filename, try playbooks/<filename>
             base="$(basename "$PB")"
             [ -f "playbooks/$base" ] && PB="playbooks/$base"
           fi
+          # Last resort: search
           if [ ! -f "$PB" ]; then
-            # Last resort: search a few levels
             found="$(find . -maxdepth 3 -type f -name "$(basename "$PLAYBOOK")" -print -quit)"
             [ -n "$found" ] && PB="$found"
           fi
 
           echo "Playbook resolved to: $PB"
-          test -f "$PB" || { echo "Playbook not found: tried $PLAYBOOK, playbooks/$(basename "$PLAYBOOK"), and search."; exit 2; }
+          test -f "$PB"        || { echo "Playbook not found."; exit 2; }
           test -f "$INVENTORY" || { echo "Inventory $INVENTORY not found"; exit 2; }
 
           ansible-playbook -i "$INVENTORY" "$PB" --syntax-check
@@ -70,39 +72,35 @@ pipeline {
       }
     }
 
-    stage('Lint (optional)') {
-      steps {
-        sh '''#!/bin/bash
-          PB="$(cat .resolved_playbook 2>/dev/null || echo "$PLAYBOOK")"
-          if command -v ansible-lint >/dev/null 2>&1; then
-            echo "== ansible-lint =="
-            ansible-lint "$PB" || true
-          else
-            echo "ansible-lint not installed; skipping"
-          fi
-        '''
-      }
-    }
-
     stage('Check mode (dry run)') {
       when { expression { return params.DRY_RUN } }
       steps {
-        sh '''#!/bin/bash
-          PB="$(cat .resolved_playbook 2>/dev/null || echo "$PLAYBOOK")"
-          echo "== Dry run =="
-          ansible-playbook -i "$INVENTORY" "$PB" --check --diff | tee ansible_dryrun.log
-        '''
+        sshagent(credentials: [ "${params.SSH_CRED_ID}" ]) {
+          sh '''#!/bin/bash
+            PB="$(cat .resolved_playbook 2>/dev/null || echo "$PLAYBOOK")"
+            echo "== Dry run =="
+
+            # Pre-accept host keys to avoid prompts (IPs or hostnames in column 1)
+            awk '!/^($|\\[|#)/ && $1 ~ /[A-Za-z0-9\\.-]+/ {print $1}' "$INVENTORY" \
+              | sort -u \
+              | while read h; do ssh-keyscan -T 5 "$h" >> ~/.ssh/known_hosts || true; done
+
+            ansible-playbook -i "$INVENTORY" "$PB" --check --diff | tee ansible_dryrun.log
+          '''
+        }
       }
     }
 
-    stage('Deploy (apply changes)') {
+    stage('Deploy (apply changes)) {
       when { expression { return !params.DRY_RUN } }
       steps {
-        sh '''#!/bin/bash
-          PB="$(cat .resolved_playbook 2>/dev/null || echo "$PLAYBOOK")"
-          echo "== Apply changes =="
-          ansible-playbook -i "$INVENTORY" "$PB" | tee ansible_apply.log
-        '''
+        sshagent(credentials: [ "${params.SSH_CRED_ID}" ]) {
+          sh '''#!/bin/bash
+            PB="$(cat .resolved_playbook 2>/dev/null || echo "$PLAYBOOK")"
+            echo "== Apply changes =="
+            ansible-playbook -i "$INVENTORY" "$PB" | tee ansible_apply.log
+          '''
+        }
       }
     }
   }

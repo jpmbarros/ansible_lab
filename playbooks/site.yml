@@ -1,0 +1,59 @@
+---
+# site.yml
+# Top-level playbook to configure all hosts
+# By João Barros
+
+- name: Configure all servers
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    common_packages:
+      - git
+      - curl
+      - vim
+      - htop
+
+  tasks:
+    - name: Ensure APT cache is up to date (Ubuntu/Debian)
+      ansible.builtin.apt:
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure common packages are installed (Ubuntu/Debian)
+      ansible.builtin.apt:
+        name: "{{ common_packages }}"
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure DNF cache is up to date (RHEL/Fedora)
+      ansible.builtin.dnf:
+        update_cache: yes
+      when: ansible_os_family == "RedHat"
+
+    - name: Ensure common packages are installed (RHEL/Fedora)
+      ansible.builtin.dnf:
+        name: "{{ common_packages }}"
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Ensure NTP service is installed
+      ansible.builtin.package:
+        name: chrony
+        state: present
+
+    - name: Ensure NTP service is enabled and running
+      ansible.builtin.service:
+        name: chronyd
+        state: started
+        enabled: yes
+      when: ansible_os_family == "RedHat"
+
+    - name: Ensure NTP service is enabled and running (Ubuntu)
+      ansible.builtin.service:
+        name: chrony
+        state: started
+        enabled: yes
+      when: ansible_os_family == "Debian"
+

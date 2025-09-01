@@ -1,43 +1,44 @@
-options { skipDefaultCheckout(true) }
-
 pipeline {
-  agent { label 'ansible' }
+  agent { label 'ansible-node' }
 
+  // We’ll do a single, explicit checkout with HTTPS+PAT
   options {
-    timestamps()
+    skipDefaultCheckout(true)
     ansiColor('xterm')
+    timestamps()
+  }
+
+  parameters {
+    string(name: 'BRANCH',    defaultValue: 'main', description: 'Git branch to build')
+    string(name: 'INVENTORY', defaultValue: 'inventory/hosts.ini', description: 'Path to inventory file')
+    string(name: 'PLAYBOOK',  defaultValue: 'site.yml', description: 'Playbook to run (e.g., site.yml or playbooks/site.yml)')
+    booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Run Ansible in --check mode first')
   }
 
   environment {
-    // Adjust if your repo uses a different inventory path/name
-    INVENTORY   = 'inventory/hosts.ini'
-    PLAYBOOK    = 'site.yml'
-    // Uncomment if your ansible.cfg lives in repo root and you want to force it:
-    // ANSIBLE_CONFIG = "${WORKSPACE}/ansible.cfg"
+    // Safer for CI
+    ANSIBLE_NOCOWS = '1'
+    ANSIBLE_HOST_KEY_CHECKING = 'False'
+    PY_COLORS = '1'
+    ANSIBLE_FORCE_COLOR = '1'
   }
 
   stages {
     stage('Checkout') {
       steps {
-        checkout([
-          $class: 'GitSCM',
-          branches: [[name: '*/main']],
-          userRemoteConfigs: [[
-            // Use SSH form if you added github-ssh:
-            url: 'git@github.com:jpmbarros/ansible_lab.git',
-            credentialsId: 'github-ssh'
-          ]]
-        ])
+        git branch: params.BRANCH,
+            url: 'https://github.com/jpmbarros/ansible_lab.git',
+            credentialsId: 'github-https'
       }
     }
 
     stage('Sanity: versions') {
       steps {
         sh '''
-          whoami
-          ansible --version
-          ansible-playbook --version
-          git log -1 --oneline || true
+          echo "== Versions =="
+          git --version
+          ansible --version || true
+          ansible-playbook --version || true
         '''
       }
     }
@@ -45,48 +46,48 @@ pipeline {
     stage('Syntax check') {
       steps {
         sh '''
-          ansible-playbook -i "${INVENTORY}" "${PLAYBOOK}" --syntax-check
+          echo "== Syntax check =="
+          test -f "$PLAYBOOK" || { echo "Playbook $PLAYBOOK not found"; exit 2; }
+          ansible-playbook -i "$INVENTORY" "$PLAYBOOK" --syntax-check
         '''
       }
     }
 
     stage('Lint (optional)') {
-      when { expression { return fileExists('ansible-lint.yaml') || fileExists('.ansible-lint') } }
       steps {
-        sh 'ansible-lint -v || true'
+        sh '''
+          if command -v ansible-lint >/dev/null 2>&1; then
+            echo "== ansible-lint =="
+            ansible-lint "$PLAYBOOK" || true
+          else
+            echo "ansible-lint not installed; skipping"
+          fi
+        '''
       }
     }
 
     stage('Check mode (dry run)') {
+      when { expression { params.DRY_RUN } }
       steps {
-        // If you rely on Jenkins-provided SSH key for remote hosts, wrap with sshagent:
-        // withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
-        //   sh 'ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "${INVENTORY}" "${PLAYBOOK}" --check -u "$SSH_USER" --private-key "$SSH_KEY"'
-        // }
-
-        // If the agent already has working SSH config/keys, just run:
+        // If your playbook connects to remote hosts over SSH with a key managed by Jenkins,
+        // wrap with sshagent(credentials: ['ansible-agent']) { ... }
         sh '''
-          ANSIBLE_HOST_KEY_CHECKING=False \
-          ansible-playbook -i "${INVENTORY}" "${PLAYBOOK}" --check
+          echo "== Dry run =="
+          ansible-playbook -i "$INVENTORY" "$PLAYBOOK" --check --diff | tee ansible_dryrun.log
         '''
       }
     }
 
     stage('Deploy (apply changes)') {
+      when { expression { !params.DRY_RUN } }
       steps {
-        // --- Enable this block if you use Vault from Jenkins credentials ---
-        // withCredentials([string(credentialsId: 'ansible-vault-pass', variable: 'VAULT_PASS')]) {
-        //   writeFile file: 'vault_pass.txt', text: VAULT_PASS
-        //   sh '''
-        //     ANSIBLE_HOST_KEY_CHECKING=False \
-        //     ansible-playbook -i "${INVENTORY}" "${PLAYBOOK}" --vault-password-file vault_pass.txt
-        //   '''
+        // For SSH auth to targets via Jenkins credential, uncomment and set your credential ID:
+        // sshagent(credentials: ['ansible-agent']) {
+        //   sh 'ansible-playbook -i "$INVENTORY" "$PLAYBOOK" | tee ansible_apply.log'
         // }
-
-        // No vault (or the node already has your vault config/file):
         sh '''
-          ANSIBLE_HOST_KEY_CHECKING=False \
-          ansible-playbook -i "${INVENTORY}" "${PLAYBOOK}"
+          echo "== Apply changes =="
+          ansible-playbook -i "$INVENTORY" "$PLAYBOOK" | tee ansible_apply.log
         '''
       }
     }
@@ -94,8 +95,8 @@ pipeline {
 
   post {
     always {
-      archiveArtifacts artifacts: 'logs/**/*, reports/**/*', allowEmptyArchive: true
-      junit testResults: 'reports/junit/*.xml', allowEmptyResults: true
+      archiveArtifacts artifacts: 'ansible_*.log', allowEmptyArchive: true
+      junit testResults: '**/junit-*.xml', allowEmptyResults: true
     }
   }
 }

@@ -18,7 +18,6 @@ pipeline {
   environment {
     INVENTORY = "${params.INVENTORY}"
     PLAYBOOK  = "${params.PLAYBOOK}"
-
     ANSIBLE_NOCOWS = '1'
     ANSIBLE_HOST_KEY_CHECKING = 'False'
     PY_COLORS = '1'
@@ -80,8 +79,8 @@ pipeline {
             PB="$(cat .resolved_playbook 2>/dev/null || echo "$PLAYBOOK")"
             echo "== Dry run =="
 
-            # Pre-accept host keys to avoid prompts (IPs or hostnames in column 1)
-            awk '!/^($|\\[|#)/ && $1 ~ /[A-Za-z0-9\\.-]+/ {print $1}' "$INVENTORY" \
+            # Pre-accept host keys to avoid prompts (IPs/hosts in first column)
+            awk '!/^($|\\[|#)/ {print $1}' "$INVENTORY" \
               | sort -u \
               | while read h; do ssh-keyscan -T 5 "$h" >> ~/.ssh/known_hosts || true; done
 
@@ -91,7 +90,7 @@ pipeline {
       }
     }
 
-    stage('Deploy (apply changes)) {
+    stage('Deploy (apply changes)') {
       when { expression { return !params.DRY_RUN } }
       steps {
         sshagent(credentials: [ "${params.SSH_CRED_ID}" ]) {

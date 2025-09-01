@@ -1,3 +1,5 @@
+options { skipDefaultCheckout(true) }
+
 pipeline {
   agent { label 'ansible' }
 
